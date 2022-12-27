@@ -1,38 +1,88 @@
 package classytypes
 
-import scala.compiletime._
-import scala.quoted._
-import scala.util._
+import scala.quoted.*
+import scala.annotation.experimental
 
-// Macro output example for resolve[Eq[Int]]:
-// {
-//   inline given Eq.Disable[Int] = error("Could not resolve typeclass instance Eq[Int]")
-//   delayedSummonInline[Eq[Int]]
-// }
-//
-// the implementation is a bit weird due to this and related issues: https://github.com/lampepfl/dotty/issues/12997
-transparent inline def resolve[A]: A =
-  ${resolveImpl[A]}
+inline def summonTypeclass[A]: A = ${Macro.summonTypeclassMacro[A]}
 
-inline def delayedSummonInline[T] = summonInline[T]
+object Macro:
+  @experimental
+  def summonTypeclassMacro[A: Type](using quotes: Quotes): Expr[A] =
+    import quotes.reflect._
 
-def resolveImpl[A: Type](using quotes: Quotes): Expr[A] =
+    case class Export(target: ValDef):
+      val methods: List[Symbol] = target.symbol.methodMembers
+        .filterNot(_.isClassConstructor)
+        .filter(_.flags.is(Flags.Deferred))
+        .filterNot(_.flags.is(Flags.Private | Flags.Protected | Flags.PrivateLocal | Flags.Synthetic))
 
-  import quotes.reflect._
 
-  val typeclass = TypeRepr.of[A]
-  val companion = typeclass.typeSymbol.companionModule
-  val typeArguments = typeclass match
-    case AppliedType(_, args) => args
-    case _ => List.empty
+    def newOverride(cls: Symbol, method: Symbol) =
+      Symbol.newMethod(
+        cls,
+        method.name,
+        cls.typeRef.memberType(method),
+        method.flags & Flags.Override & Flags.Final,
+        Symbol.noSymbol)
 
-  val disable = TypeSelect(Ref(companion), "Disable").tpe
+    def applyAll(target: Term, parameters: List[List[Tree]]) =
+      parameters.foldLeft(target: Term)((target, section) =>
+        val (values, types) = section.partitionMap({
+          case parameter@Ident(_) => Left(parameter.underlying)
+          case parameter@Inferred() => Right(parameter)
+        })
 
-  val symbol = Symbol.newMethod(Symbol.spliceOwner, "", disable.appliedTo(typeArguments), Flags.Given | Flags.Final | Flags.Inline, Symbol.noSymbol)
-  val message = Expr(s"Could not resolve typeclass instance ${typeclass.show}")
-  val body = '{error(${message})}.asTerm
+        if values.nonEmpty then
+          Apply(target, values)
+        else if types.nonEmpty then
+          TypeApply(target, types)
+        else
+          target
+      )
 
-  val disableConversion = DefDef(symbol, _ => Some(body))
+    def splitIntersectionType(tpe: TypeRepr): List[TypeRepr] =
+      val result = scala.collection.mutable.Set.empty[TypeRepr]
 
-  val summon = '{delayedSummonInline[A]}.asTerm
-  (Block(List(disableConversion), summon).asExprOf[A])
+      def go(tpe: TypeRepr): Unit =
+        tpe.dealias match {
+          case branch: AndType =>
+            go(branch.left)
+            go(branch.right)
+          case leaf  => result.add(leaf)
+        }
+
+      go(tpe)
+
+      result.toList
+
+    val types = splitIntersectionType(TypeRepr.of[A])
+
+    val exports = types.zipWithIndex.map { (tpe, i) =>
+      val value = Implicits.search(tpe) match
+        case result: ImplicitSearchSuccess => result.tree
+        case _ => report.errorAndAbort(s"Could not resolve typeclass ${tpe.show(using Printer.TypeReprAnsiCode)}")
+
+      val target = ValDef(Symbol.newVal(Symbol.spliceOwner, s"implementation$i", tpe, Flags.EmptyFlags, Symbol.noSymbol), Some(value))
+
+      Export(target)
+    }
+
+    def decls(cls: Symbol): List[Symbol] =
+      exports.flatMap(_.methods).map(newOverride(cls, _))
+
+    val name = types.map(_.typeSymbol.name).mkString("_")
+    val parents = TypeRepr.of[Any] +: types
+    val proxySymbol = Symbol.newClass(Symbol.spliceOwner, name, parents, decls, None)
+
+    val body = exports.flatMap(exp =>
+      val ref = Ref(exp.target.symbol)
+      exp.methods.map(method => DefDef(proxySymbol.declaredMethod(method.name).head, params => Some(applyAll(Select(ref, method), params))))
+    )
+
+    val proxyClass = ClassDef(proxySymbol, parents.map(Inferred(_)), body)
+    val ctor = Select(New(TypeIdent(proxySymbol)), proxySymbol.primaryConstructor)
+    val newClass = Typed(Apply(ctor, Nil), TypeTree.of[A])
+
+    val valDefs = exports.map(_.target)
+
+    Block(valDefs :+ proxyClass, newClass).asExprOf[A]

@@ -6,24 +6,25 @@ Based on an excellent idea by [@regiskuckaertz](https://github.com/regiskuckaert
 #### Example typeclass declaration
 
 ```scala
-trait Ord[A](base: PartialOrd[A]) extends PartialOrd.Base[A] with Priority1:
-  val partialOrd = base
-  export base._
+trait Map[F[_]] extends Typeclass:
+  def map[A, B](f: A => B): F[A] => F[B]
 
-  def compare(left: A, right: A): Ordering
+trait Zip[F[_]] extends Typeclass:
+  def zip[A, B](fa: F[A], fb: F[B]): F[(A, B)]
 
-extension [A](self: A)(using e: Ord[A])
-  infix def =?= (right: A) = e.compare(self, right)
+trait ZipIdentity[F[_]] extends Typeclass:
+  def any: F[Any]
 
-object Ord extends Typeclass[Ord]:
+trait Join[F[_]] extends Typeclass:
+  def join[A](ffa: F[F[A]]): F[A]
 
-  transparent trait Base[A] extends PartialOrd.Base[A]:
-    def ord: Ord[A]
+trait JoinIdentity[F[_]] extends Typeclass:
+  def pure[A](value: A): F[A]
 
-  def extract[A](base: Base[A]): Ord[A] = base.ord
+type Functor[F[_]] = Map[F]
+type Applicative[F[_]] = Functor[F] & Zip[F] & ZipIdentity[F]
+type Monad[F[_]] = Applicative[F] & Join[F] & JoinIdentity[F]
 
-  given Ord[Int](resolve) with
-    def compare(left: Int, right: Int): Ordering = Ordering.Equal
 ```
 
 
@@ -31,25 +32,37 @@ object Ord extends Typeclass[Ord]:
 #### Example instance declarations
 
 ```scala
-case class Wrapper[A](value: A)
+case class Id[A](value: A)
+object Id:
+  given Map[Id] with
+    def map[A, B](f: A => B): Id[A] => Id[B] =
+      w => Id(f(w.value))
 
-object Wrapper:
+  given Zip[Id] with
+    def zip[A, B](a: Id[A], b: Id[B]): Id[(A, B)] =
+      Id((a.value, b.value))
 
-  given[A: Eq]: Eq[Wrapper[A]] with
-    def equal(left: Wrapper[A], right: Wrapper[A]): Boolean = left.value === right.value
+  given ZipIdentity[Id] with
+    def any: Id[Any] =
+      Id[Any](())
 
-  given[A: PartialOrd]: PartialOrd[Wrapper[A]](resolve) with
-    def comparePartial(left: Wrapper[A], right: Wrapper[A]): PartialOrdering = left.value =??= right.value
+  given Join[Id] with
+    def join[A](ffa: Id[Id[A]]): Id[A] =
+      ffa.value
 
-  given[A: Ord]: Ord[Wrapper[A]](resolve) with
-    def compare(left: Wrapper[A], right: Wrapper[A]): Ordering = left.value =?= right.value
+  given JoinIdentity[Id] with
+    def pure[A](value: A): Id[A] =
+      Id(value)
 
+  given Traverse[Id] with
+    def traverse[G[_], A, B](fa: Id[A], f: A => G[B])(using ops: Map[G] & Zip[G] & ZipIdentity[G]): G[Id[B]] =
+      f(fa.value).map(Id(_))
 ```
 
 #### And the following works too!
 
 ```scala
-def infamous[F[_]: Monad: Traversable](fa: F[Int]) =
+def infamous[F[_] : Monad &&& Traversable](fa: F[Int]) =
   fa.map(_ + 1)
 ```
 
@@ -60,12 +73,6 @@ https://github.com/zio/zio-prelude/issues/485
 
 
 #### Run with
-
-```
-mill root
-```
-
-or 
 
 ```scala
 sbt run

@@ -1,101 +1,89 @@
 package classytypes
 package examples
 
-trait Functor[F[_]]:
+import scala.annotation.targetName
+import scala.collection.immutable
+import scala.compiletime.summonInline
+
+trait Map[F[_]] extends Typeclass:
+  self =>
   def map[A, B](f: A => B): F[A] => F[B]
+  extension[A] (fa: F[A])
+    def map[B](f: A => B): F[B] = self.map(f)(fa)
 
-object Functor extends TypeclassF[Functor]:
-  transparent trait Base[F[_]]:
-    def functor: Functor[F]
-
-  def extract[F[_]](base: Base[F]): Functor[F] = base.functor
-
-  given Functor[Option] with
-    override def map[A, B](f: A => B): Option[A] => Option[B] =
-      _.map(f)
-
-extension [F[_], A](self: F[A])(using instance: Functor[F])
-  def map[B](f: A => B): F[B] = instance.map(f)(self)
+object Map:
+  given Map[List] with
+    def map[A, B](f: A => B): List[A] => List[B] = _.map(f)
 
 
-trait Applicative[F[_]](base: Functor[F]) extends Functor.Base[F] with Priority0:
-  val functor = base
-  export base.*
-
-  def unit: F[Any]
+trait Zip[F[_]] extends Typeclass:
+  self =>
   def zip[A, B](fa: F[A], fb: F[B]): F[(A, B)]
+  extension[A] (fa: F[A])
+    @targetName("zip_ext")
+    def zip[B](fb: F[B]): F[(A, B)] = self.zip(fa, fb)
 
-extension [F[_], A](self: F[A])(using instance: Applicative[F])
-  def zip[B](fb: F[B]) = instance.zip(self, fb)
+object Zip:
+  given Zip[List] with
+    def zip[A, B](fa: List[A], fb: List[B]): List[(A, B)] =
+      fa.flatMap(a => fb.map(b => (a, b)))
 
-extension [A](self: A)
-  def pure[F[_]](using instance: Applicative[F]): F[A] =
-    instance.unit.map(_ => self)
+trait Join[F[_]] extends Typeclass:
+  self =>
+  def join[A](ffa: F[F[A]]): F[A]
 
-object Applicative extends TypeclassF[Applicative]:
-  transparent trait Base[F[_]] extends Functor.Base[F]:
-    def applicative: Applicative[F]
+  extension[A] (fa: F[A])
+    def flatMap[B](f: A => F[B])(using map: Map[F]): F[B] =
+      self.join(map.map(f)(fa))
 
-  def extract[F[_]](base: Base[F]): Applicative[F] = base.applicative
+  extension[A] (fa: F[F[A]])
+    def flatten: F[A] = self.join(fa)
 
-  given Applicative[Option](resolve) with Monad.ApplicativeDefaults[Option] with
-    def unit: Option[Any] = Some(())
+object Join:
+  given Join[List] with
+    def join[A](ffa: List[List[A]]): List[A] = ffa.flatten
 
-trait Monad[F[_]](base: Applicative[F]) extends Applicative.Base[F] with Priority1:
-  val applicative = base
-  export base.*
+trait ZipIdentity[F[_]] extends Typeclass:
+  def any: F[Any]
 
-  def join[A](self: F[F[A]]): F[A]
+object ZipIdentity:
+  given ZipIdentity[List] with
+    def any: List[Any] = List(())
 
-extension [F[_], A](self: F[F[A]])(using instance: Monad[F])
-  def join: F[A] = instance.join(self)
+trait JoinIdentity[F[_]] extends Typeclass:
+  def pure[A](value: A): F[A]
 
-extension [F[_]: Monad, A](self: F[A])
-  def bind[B](f: A => F[B]): F[B] =
-    self.map(f).join
 
-object Monad extends TypeclassF[Monad]:
-  transparent trait Base[F[_]] extends Applicative.Base[F]:
-    def monad: Monad[F]
+object JoinIdentity:
+  given joinIdentityList: JoinIdentity[List] with
+    def pure[A](value: A): List[A] = List(value)
 
-  def extract[F[_]](base: Base[F]): Monad[F] = base.monad
+trait Traverse[F[_]] extends Typeclass:
+  self =>
+  def traverse[G[_]: Map &&& Zip &&& ZipIdentity, A, B](fa: F[A], f: A => G[B]): G[F[B]]
+  extension [A] (fa: F[A])
+    @targetName("traverse_ext")
+    def traverse[G[_]: Map &&& Zip &&& ZipIdentity, B](f: A => G[B]): G[F[B]] = self.traverse(fa, f)
 
-  trait ApplicativeDefaults[F[_]](using monad: Monad[F]) extends Applicative[F]:
-    def zip[A, B](fa: F[A], fb: F[B]): F[(A, B)] =
-      fa.bind(a => fb.map(b => (a, b)))
+object Traverse:
+  given Traverse[List] with
+    def traverse[G[_], A, B](fa: List[A], f: A => G[B])(using ops: Map[G] & Zip[G] & ZipIdentity[G]): G[List[B]] =
+      val empty = ops.any.map(_ => List.empty[B])
+      fa.foldRight(empty)((a, bs) => f(a).zip(bs).map(_ :: _))
 
-  given Monad[Option](resolve) with
-    def join[A](fa: Option[Option[A]]): Option[A] =
-      fa.flatMap(identity)
 
-trait Traversable[F[_]](base: Functor[F]) extends Functor.Base[F] with Priority2:
-  val functor = base
-  export base.*
+type Functor[F[_]] = Map[F]
+object Functor:
+  inline def apply[F[_]]: Functor[F] = summonInline
 
-  def traverse[G[_]: Applicative, A, B](fa: F[A])(f: A => G[B]): G[F[B]]
+type Applicative[F[_]] = Functor[F] & Zip[F] & ZipIdentity[F]
+object Applicative:
+  inline def apply[F[_]]: Applicative[F] = summonInline
 
-object Traversable extends TypeclassF[Traversable]:
-  transparent trait Base[F[_]] extends Functor.Base[F]:
-    def traversable: Traversable[F]
+type Monad[F[_]] = Applicative[F] & Join[F] & JoinIdentity[F]
+object Monad:
+  inline def apply[F[_]]: Monad[F] = summonInline
 
-  def extract[F[_]](base: Base[F]): Traversable[F] = base.traversable
-
-extension [F[_], A](self: F[A])(using instance: Traversable[F])
-  def traverse[G[_]: Applicative, B](f: A => G[B]): G[F[B]] = instance.traverse(self)(f)
-
-type Id[A] >: A <: A
-
-object Id:
-  def apply[A](value: A): Id[A] = value
-
-  given Functor[Id] with
-    def map[A, B](f: A => B): Id[A] => Id[B] = f
-
-  given Applicative[Id](resolve) with Monad.ApplicativeDefaults[Id] with
-    def unit: Id[Any] = ()
-
-  given Monad[Id](resolve) with
-    def join[A](fa: Id[Id[A]]): Id[A] = fa
-
-  given Traversable[Id](resolve) with
-    def traverse[G[_]: Applicative, A, B](fa: Id[A])(f: A => G[B]): G[Id[B]] = f(fa)
+type Traversable[F[_]] = Functor[F] & Traverse[F]
+object Traversable:
+  inline def apply[F[_]]: Traversable[F] = summonInline
