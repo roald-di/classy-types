@@ -22,7 +22,7 @@ object Macro:
         cls,
         method.name,
         cls.typeRef.memberType(method),
-        method.flags & Flags.Override & Flags.Final,
+        Flags.Method | Flags.Override | Flags.Final | (method.flags & Flags.ExtensionMethod),
         Symbol.noSymbol)
 
     def applyAll(target: Term, parameters: List[List[Tree]]) =
