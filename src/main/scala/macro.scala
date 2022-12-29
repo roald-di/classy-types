@@ -59,8 +59,10 @@ object Macro:
 
     val exports = types.zipWithIndex.map { (tpe, i) =>
       val value = Implicits.search(tpe) match
-        case result: ImplicitSearchSuccess => result.tree
-        case _ => report.errorAndAbort(s"Could not resolve typeclass ${tpe.show(using Printer.TypeReprAnsiCode)}")
+        case result: ImplicitSearchSuccess =>
+          result.tree
+        case error: ImplicitSearchFailure =>
+          report.errorAndAbort(s"Could not resolve typeclass ${tpe.show(using Printer.TypeReprAnsiCode)}: ${error.explanation}")
 
       val target = ValDef(Symbol.newVal(Symbol.spliceOwner, s"implementation$i", tpe, Flags.EmptyFlags, Symbol.noSymbol), Some(value))
 
